@@ -1,0 +1,23 @@
+@page "/update"
+@using UI.Services
+@inject CoordinatorService Coordinator
+
+<h3>Update (2PC)</h3>
+
+<input @bind="value" class="form-control" />
+<button class="btn btn-primary mt-2" @onclick="Send">Wyślij</button>
+
+@if (result != null)
+{
+    <p class="mt-3">Wynik: @result</p>
+}
+
+@code {
+    private string value = "";
+    private string result = "";
+
+    private async Task Send()
+    {
+        result = await Coordinator.SendUpdate(value);
+    }
+}

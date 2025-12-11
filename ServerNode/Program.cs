@@ -1,41 +1,43 @@
 var builder = WebApplication.CreateBuilder(args);
-
-// Add services to the container.
-// Learn more about configuring OpenAPI at https://aka.ms/aspnet/openapi
-builder.Services.AddOpenApi();
-
 var app = builder.Build();
 
-// Configure the HTTP request pipeline.
-if (app.Environment.IsDevelopment())
-{
-    app.MapOpenApi();
-}
+bool isFailed = false; 
+string storedValue = "";
 
-app.UseHttpsRedirection();
-
-var summaries = new[]
+app.MapPost("/prepare", (string value) =>
 {
-    "Freezing", "Bracing", "Chilly", "Cool", "Mild", "Warm", "Balmy", "Hot", "Sweltering", "Scorching"
-};
+    if (isFailed) return Results.BadRequest("Server failed.");
+    // Symulacja: zawsze odpowiada YES w fazie prepare
+    return Results.Ok("YES");
+});
 
-app.MapGet("/weatherforecast", () =>
+app.MapPost("/commit", (string value) =>
 {
-    var forecast =  Enumerable.Range(1, 5).Select(index =>
-        new WeatherForecast
-        (
-            DateOnly.FromDateTime(DateTime.Now.AddDays(index)),
-            Random.Shared.Next(-20, 55),
-            summaries[Random.Shared.Next(summaries.Length)]
-        ))
-        .ToArray();
-    return forecast;
-})
-.WithName("GetWeatherForecast");
+    if (isFailed) return Results.BadRequest("Server failed.");
+    storedValue = value;
+    return Results.Ok("COMMIT_OK");
+});
+
+app.MapPost("/abort", () =>
+{
+    return Results.Ok("ABORTED");
+});
+
+app.MapPost("/fail/{type}", (string type) =>
+{
+    isFailed = true;
+    return Results.Ok($"Server failed with type: {type}");
+});
+
+app.MapPost("/recover", () =>
+{
+    isFailed = false;
+    return Results.Ok("Server recovered.");
+});
+
+app.MapGet("/status", () =>
+{
+    return new { Failed = isFailed, Value = storedValue };
+});
 
 app.Run();
-
-record WeatherForecast(DateOnly Date, int TemperatureC, string? Summary)
-{
-    public int TemperatureF => 32 + (int)(TemperatureC / 0.5556);
-}

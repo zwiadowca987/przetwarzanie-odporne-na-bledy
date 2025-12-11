@@ -1,41 +1,40 @@
 var builder = WebApplication.CreateBuilder(args);
-
-// Add services to the container.
-// Learn more about configuring OpenAPI at https://aka.ms/aspnet/openapi
-builder.Services.AddOpenApi();
-
 var app = builder.Build();
 
-// Configure the HTTP request pipeline.
-if (app.Environment.IsDevelopment())
+string[] nodes = 
 {
-    app.MapOpenApi();
-}
-
-app.UseHttpsRedirection();
-
-var summaries = new[]
-{
-    "Freezing", "Bracing", "Chilly", "Cool", "Mild", "Warm", "Balmy", "Hot", "Sweltering", "Scorching"
+    "http://localhost:5010",
+    "http://localhost:5011",
+    "http://localhost:5012",
+    "http://localhost:5013",
+    "http://localhost:5014",
+    "http://localhost:5015",
 };
 
-app.MapGet("/weatherforecast", () =>
+app.MapPost("/update", async (string value) =>
 {
-    var forecast =  Enumerable.Range(1, 5).Select(index =>
-        new WeatherForecast
-        (
-            DateOnly.FromDateTime(DateTime.Now.AddDays(index)),
-            Random.Shared.Next(-20, 55),
-            summaries[Random.Shared.Next(summaries.Length)]
-        ))
-        .ToArray();
-    return forecast;
-})
-.WithName("GetWeatherForecast");
+    using var client = new HttpClient();
+
+    // PHASE 1 — PREPARE
+    foreach (var n in nodes)
+    {
+        var resp = await client.PostAsJsonAsync($"{n}/prepare", value);
+        if (!resp.IsSuccessStatusCode)
+        {
+            // ABORT
+            foreach (var n2 in nodes)
+                await client.PostAsync($"{n2}/abort", null);
+            return Results.BadRequest("ABORTED");
+        }
+    }
+
+    // PHASE 2 — COMMIT
+    foreach (var n in nodes)
+    {
+        await client.PostAsJsonAsync($"{n}/commit", value);
+    }
+
+    return Results.Ok("COMMITTED");
+});
 
 app.Run();
-
-record WeatherForecast(DateOnly Date, int TemperatureC, string? Summary)
-{
-    public int TemperatureF => 32 + (int)(TemperatureC / 0.5556);
-}

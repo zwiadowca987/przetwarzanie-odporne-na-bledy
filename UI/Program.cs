@@ -1,25 +1,28 @@
-using projekt.Components;
+using UI.Services;
+using UI.Components;
 
 var builder = WebApplication.CreateBuilder(args);
 
 // Add services to the container.
 builder.Services.AddRazorComponents()
     .AddInteractiveServerComponents();
-builder.Services.AddScoped<TwoPhaseCommitService>();
-builder.Services.AddHttpClient();
+
+// Coordinator communication service
+builder.Services.AddHttpClient<CoordinatorService>(client =>
+{
+    client.BaseAddress = new Uri("http://localhost:5000"); // CoordinatorNode
+});
+
+// Remove HTTPS – Coordinator is HTTP only
+// app.UseHttpsRedirection();
+// app.UseHsts();
 
 var app = builder.Build();
 
-// Configure the HTTP request pipeline.
 if (!app.Environment.IsDevelopment())
 {
     app.UseExceptionHandler("/Error", createScopeForErrors: true);
-    // The default HSTS value is 30 days. You may want to change this for production scenarios, see https://aka.ms/aspnetcore-hsts.
-    app.UseHsts();
 }
-
-app.UseHttpsRedirection();
-
 
 app.UseAntiforgery();
 
