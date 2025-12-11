@@ -11,9 +11,13 @@ string[] nodes =
     "http://localhost:5015",
 };
 
-app.MapPost("/update", async (string value) =>
+app.MapPost("/update", async (UpdateRequest request) =>
 {
     using var client = new HttpClient();
+    
+    string value = request.Value; 
+
+    Console.WriteLine($"[COORDINATOR] Otrzymano żądanie aktualizacji do wartości: {value}");
 
     // PHASE 1 — PREPARE
     foreach (var n in nodes)
@@ -38,3 +42,4 @@ app.MapPost("/update", async (string value) =>
 });
 
 app.Run();
+public record UpdateRequest(string Value);

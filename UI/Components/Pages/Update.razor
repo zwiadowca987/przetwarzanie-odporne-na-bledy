@@ -1,11 +1,14 @@
 @page "/update"
 @using UI.Services
 @inject CoordinatorService Coordinator
+@inject ILogger<Program> Logger
 
 <h3>Update (2PC)</h3>
 
 <input @bind="value" class="form-control" />
-<button class="btn btn-primary mt-2" @onclick="Send">Wyślij</button>
+<button class="btn btn-primary mt-2" @onclick="Send" disabled="@isLoading">
+    @if(isLoading) { <span>Wysyłanie...</span> } else { <span>Wyślij:)</span> }
+</button>
 
 @if (result != null)
 {
@@ -15,9 +18,30 @@
 @code {
     private string value = "";
     private string result = "";
+    private bool isLoading = false; 
 
     private async Task Send()
     {
-        result = await Coordinator.SendUpdate(value);
+        result = "";
+        isLoading = true;
+        
+        //Logger.LogInformation("Kliknięto przycisk Wyślij. Wartość: {Value}", value);
+        Console.WriteLine($"[DEBUG] Kliknięto przycisk. Wartość: {value}"); // Opcja "brudna" do konsoli
+
+        try 
+        {
+            result = await Coordinator.SendUpdate(value);
+            
+            Logger.LogInformation("Otrzymano odpowiedź: {Result}", result);
+        }
+        catch (Exception ex)
+        {
+            result = $"BŁĄD: {ex.Message}";
+            Logger.LogError(ex, "Wystąpił błąd podczas wysyłania update'u");
+        }
+        finally 
+        {
+            isLoading = false;
+        }
     }
 }
