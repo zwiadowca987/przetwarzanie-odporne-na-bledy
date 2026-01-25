@@ -5,7 +5,8 @@ var builder = WebApplication.CreateBuilder(args);
 
 // Add services to the container.
 builder.Services.AddRazorComponents()
-    .AddInteractiveServerComponents();
+    .AddInteractiveServerComponents(options => options.DetailedErrors = true);
+
 
 // Coordinator communication service
 builder.Services.AddHttpClient<CoordinatorService>(client =>
@@ -16,6 +17,7 @@ builder.Services.AddHttpClient<CoordinatorService>(client =>
 // Remove HTTPS – Coordinator is HTTP only
 // app.UseHttpsRedirection();
 // app.UseHsts();
+
 
 var app = builder.Build();
 

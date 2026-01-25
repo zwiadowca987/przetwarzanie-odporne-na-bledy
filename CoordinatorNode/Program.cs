@@ -1,45 +1,66 @@
+using CoordinatorNode.Hubs;
+using CoordinatorNode.Services;
+using Microsoft.AspNetCore.Mvc;
+
 var builder = WebApplication.CreateBuilder(args);
+
+// Rejestracja serwisów
+builder.Services.AddSignalR();
+builder.Services.AddHttpClient(); 
+
+builder.Services.AddSingleton<TransactionCoordinatorService>(); 
+
+builder.Services.AddCors(options =>
+{
+    options.AddPolicy("AllowUI", policy =>
+    {
+        policy.WithOrigins("http://localhost:5001", "http://127.0.0.1:5001") 
+            .AllowAnyHeader()
+            .AllowAnyMethod()
+            .AllowCredentials(); 
+    });
+});
+
 var app = builder.Build();
 
-string[] nodes = 
+app.UseCors("AllowUI");
+
+// Mapowanie Huba
+app.MapHub<CoordinatorHub>("/hubs/transaction");
+
+// Endpointy Biznesowe
+app.MapPost("/update", async ([FromBody] UpdateRequest request, TransactionCoordinatorService coordinator) =>
 {
-    "http://localhost:5010",
-    "http://localhost:5011",
-    "http://localhost:5012",
-    "http://localhost:5013",
-    "http://localhost:5014",
-    "http://localhost:5015",
-};
+    bool success = await coordinator.PerformTwoPhaseCommitAsync(request.Value);
+    return success ? Results.Ok(new { status = "COMMITTED" }) : Results.BadRequest(new { status = "ABORTED" });
+});
 
-app.MapPost("/update", async (UpdateRequest request) =>
+// Endpointy Sterujące (Symulacja Błędów)
+
+app.MapPost("/restore", async (TransactionCoordinatorService coordinator) => 
 {
-    using var client = new HttpClient();
-    
-    string value = request.Value; 
+    await coordinator.SetErrorStateAsync("None"); // Bez błędów
+    return Results.Ok("Restored");
+});
 
-    Console.WriteLine($"[COORDINATOR] Otrzymano żądanie aktualizacji do wartości: {value}");
+app.MapPost("/fail1", async (TransactionCoordinatorService coordinator) => 
+{
+    await coordinator.SetErrorStateAsync("Timeout"); // Np. Timeout
+    return Results.Ok("Injected Error 1");
+});
 
-    // PHASE 1 — PREPARE
-    foreach (var n in nodes)
-    {
-        var resp = await client.PostAsJsonAsync($"{n}/prepare", value);
-        if (!resp.IsSuccessStatusCode)
-        {
-            // ABORT
-            foreach (var n2 in nodes)
-                await client.PostAsync($"{n2}/abort", null);
-            return Results.BadRequest("ABORTED");
-        }
-    }
+app.MapPost("/fail2", async (TransactionCoordinatorService coordinator) => 
+{
+    await coordinator.SetErrorStateAsync("Crash"); // Np. Crash
+    return Results.Ok("Injected Error 2");
+});
 
-    // PHASE 2 — COMMIT
-    foreach (var n in nodes)
-    {
-        await client.PostAsJsonAsync($"{n}/commit", value);
-    }
-
-    return Results.Ok("COMMITTED");
+app.MapPost("/fail3", async (TransactionCoordinatorService coordinator) => 
+{
+    await coordinator.SetErrorStateAsync("DbError"); // Np. Błąd zapisu
+    return Results.Ok("Injected Error 3");
 });
 
 app.Run();
+
 public record UpdateRequest(string Value);
