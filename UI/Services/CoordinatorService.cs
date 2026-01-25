@@ -1,6 +1,6 @@
 namespace UI.Services;
 
-using Microsoft.Extensions.Logging; 
+using Microsoft.Extensions.Logging;
 
 public class CoordinatorService
 {
@@ -14,31 +14,58 @@ public class CoordinatorService
     }
 
     public async Task<string> SendUpdate(string value)
-{
-    var url = "http://localhost:5000/update";
-    _logger.LogInformation("Wysyłanie POST do {Url} z danymi: {Value}", url, value);
-
-    try
     {
-        var response = await _http.PostAsJsonAsync(url, new { value });
-        
-        var content = await response.Content.ReadAsStringAsync();
+        var url = "http://localhost:5000/update";
+        _logger.LogInformation("TRANSACTION START: {Value}", value);
 
-        if (!response.IsSuccessStatusCode)
+        try
         {
-            _logger.LogWarning("Serwer zwrócił błąd {StatusCode}: {Content}", response.StatusCode, content);
-            
-            
-            return string.IsNullOrEmpty(content) ? "ERROR" : content.Trim('"'); 
-            
+            var response = await _http.PostAsJsonAsync(url, new { value });
+            if (!response.IsSuccessStatusCode) return "ERROR";
+            var result = await response.Content.ReadFromJsonAsync<TransactionResultResponse>();
+            return result?.Status ?? "UNKNOWN";
         }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Błąd połączenia z koordynatorem");
+            return "CONNECTION_ERROR";
+        }
+    }
 
-        return content.Trim('"');
-    }
-    catch (Exception ex)
+    public async Task SetCoordinatorErrorState(string errorType)
     {
-        _logger.LogError(ex, "Krytyczny błąd połączenia z {Url}", url);
-        throw; 
+        await SendFaultRequest("http://localhost:5000", errorType);
     }
-}
+
+    public async Task SetClientErrorState(string clientUrl, string errorType)
+    {
+        await SendFaultRequest(clientUrl, errorType);
+    }
+
+    private async Task SendFaultRequest(string baseUrl, string errorType)
+    {
+        string endpoint = errorType switch
+        {
+            "None" => "/restore",
+            "Timeout" or "Error1" => "/fail/timeout",
+            "Crash" or "Error2" => "/fail/crash",
+            "DbError" or "Error3" => "/fail/dberror",
+            _ => "/restore"
+        };
+
+        var url = $"{baseUrl}{endpoint}";
+        _logger.LogInformation("Wstrzykiwanie awarii: {Url}", url);
+
+        try
+        {
+            await _http.PostAsync(url, null);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Błąd wstrzykiwania błędu do {Url}", url);
+        }
+    }
+
+    private record TransactionResultResponse(string Status);
+
 }

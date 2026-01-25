@@ -1,45 +1,68 @@
 using Microsoft.AspNetCore.Mvc;
+using ServerNode.Services;
 
 var builder = WebApplication.CreateBuilder(args);
+
+// Rejestracja serwisu jako Singleton
+builder.Services.AddSingleton<TransactionClientService>();
+
 var app = builder.Build();
 
-bool isFailed = false; 
-string storedValue = "";
+// Automatyczny start połączenia SignalR przy starcie aplikacji
+var transactionService = app.Services.GetRequiredService<TransactionClientService>();
+_ = Task.Run(async () => await transactionService.StartAsync());
 
-app.MapPost("/prepare", ([FromBody]string value) =>
+
+// --- ENDPOINTY 2PC ---
+
+app.MapPost("/prepare", async ([FromBody] string value, TransactionClientService service) =>
 {
-    if (isFailed) return Results.BadRequest("Server failed.");
-    // Symulacja: zawsze odpowiada YES w fazie prepare
-    return Results.Ok("YES");
+    var result = await service.PrepareAsync(value);
+    return result ? Results.Ok("VOTE_COMMIT") : Results.BadRequest("VOTE_ABORT");
 });
 
-app.MapPost("/commit", ([FromBody] string value) =>
+app.MapPost("/commit", async ([FromBody] string value, TransactionClientService service) =>
 {
-    if (isFailed) return Results.BadRequest("Server failed.");
-    storedValue = value;
-    return Results.Ok("COMMIT_OK");
+    var result = await service.CommitAsync(value);
+    return result ? Results.Ok("COMMITTED") : Results.StatusCode(500);
 });
 
-app.MapPost("/abort", () =>
+app.MapPost("/abort", (TransactionClientService service) =>
 {
+    service.Abort();
     return Results.Ok("ABORTED");
 });
 
-app.MapPost("/fail/{type}", (string type) =>
+
+// --- ENDPOINTY STERUJĄCE (FAULTS) ---
+
+app.MapPost("/restore", async (TransactionClientService service) =>
 {
-    isFailed = true;
-    return Results.Ok($"Server failed with type: {type}");
+    await service.SetErrorStateAsync("None");
+    return Results.Ok("OK");
 });
 
-app.MapPost("/recover", () =>
+app.MapPost("/fail/timeout", async (TransactionClientService service) =>
 {
-    isFailed = false;
-    return Results.Ok("Server recovered.");
+    await service.SetErrorStateAsync("Timeout");
+    return Results.Ok("OK");
 });
 
-app.MapGet("/status", () =>
+app.MapPost("/fail/crash", async (TransactionClientService service) =>
 {
-    return new { Failed = isFailed, Value = storedValue };
+    await service.SetErrorStateAsync("Crash");
+    return Results.Ok("OK");
+});
+
+app.MapPost("/fail/dberror", async (TransactionClientService service) =>
+{
+    await service.SetErrorStateAsync("DbError");
+    return Results.Ok("OK");
+});
+
+app.MapGet("/status", (TransactionClientService service) =>
+{
+    return Results.Ok(service.GetStatus());
 });
 
 app.Run();

@@ -1,47 +1,295 @@
 @page "/update"
 @using UI.Services
+@using Microsoft.AspNetCore.SignalR.Client
 @inject CoordinatorService Coordinator
+@inject IConfiguration Configuration
 @inject ILogger<Program> Logger
+@implements IAsyncDisposable
+@rendermode @(new InteractiveServerRenderMode(prerender: false))
 
-<h3>Update (2PC)</h3>
+<div class="container mt-4">
+    <div class="d-flex justify-content-between align-items-center mb-4">
+        <h2>Panel Sterowania 2PC</h2>
+        <div class="text-muted small">
+            Status SignalR: 
+            <span class="@(hubConnection?.State == HubConnectionState.Connected ? "text-success" : "text-danger")">
+                @(hubConnection?.State.ToString() ?? "Disconnected")
+            </span>
+        </div>
+    </div>
 
-<input @bind="value" class="form-control" />
-<button class="btn btn-primary mt-2" @onclick="Send" disabled="@isLoading">
-    @if(isLoading) { <span>Wysyłanie...</span> } else { <span>Wyślij:)</span> }
-</button>
+    <div class="card shadow-sm mb-4">
+        <div class="card-body">
+            <h5 class="card-title">Nowa Transakcja</h5>
+            <div class="input-group">
+                <span class="input-group-text">Wartość</span>
+                <input @bind="newValue" class="form-control" placeholder="Wpisz tekst..." disabled="@isTransactionRunning" />
+                <button class="btn btn-primary px-4" @onclick="SendTransaction" disabled="@isTransactionRunning">
+                    @if(isTransactionRunning) 
+                    {
+                        <span class="spinner-border spinner-border-sm me-2"></span><span>Przetwarzanie...</span> 
+                    } 
+                    else { <span>Wyślij (2PC)</span> }
+                </button>
+            </div>
+            @if (!string.IsNullOrEmpty(transactionResult))
+            {
+                <div class="alert @(transactionResult == "COMMITTED" ? "alert-success" : "alert-danger") mt-3 mb-0 py-2">
+                    Wynik: <strong>@transactionResult</strong>
+                </div>
+            }
+        </div>
+    </div>
 
-@if (result != null)
-{
-    <p class="mt-3">Wynik: @result</p>
-}
+    <div class="card border-primary mb-4">
+        <div class="card-header bg-primary text-white d-flex justify-content-between">
+            <span class="fw-bold">@coordinatorState.Name (Koordynator)</span>
+            <span class="badge bg-light text-dark">@coordinatorState.TransactionState</span>
+        </div>
+        <div class="card-body">
+            <div class="row align-items-center">
+                <div class="col-md-4">
+                    <strong>Stan:</strong> 
+                    <span class="badge @GetStatusColor(coordinatorState.CurrentErrorState)">@coordinatorState.CurrentErrorState</span>
+                </div>
+                <div class="col-md-8 text-end">
+                    <span class="me-2 small text-muted">Symulacja awarii:</span>
+                    <div class="btn-group btn-group-sm">
+                        <button class="btn btn-outline-success" @onclick='() => InjectError(coordinatorState, "None")'>OK</button>
+                        <button class="btn btn-outline-warning text-dark" @onclick='() => InjectError(coordinatorState, "Timeout")'>Timeout</button>
+                        <button class="btn btn-outline-danger" @onclick='() => InjectError(coordinatorState, "Crash")'>Crash</button>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <h4 class="mb-3">Klienci (Uczestnicy)</h4>
+    <div class="table-responsive shadow-sm rounded">
+        <table class="table table-hover table-striped align-middle mb-0">
+            <thead class="table-dark">
+                <tr>
+                    <th>Maszyna</th>
+                    <th>Stan</th>
+                    <th>Transakcja</th>
+                    <th>Ostatnia Wartość</th>
+                    <th class="text-end">Symulacja Awarii</th>
+                </tr>
+            </thead>
+            <tbody>
+                @foreach (var client in clients)
+                {
+                    <tr>
+                        <td class="fw-bold">
+                            @client.Name <br/>
+                            <small class="text-muted" style="font-size: 0.7rem">@client.Id</small>
+                        </td>
+                        <td><span class="badge @GetStatusColor(client.CurrentErrorState)">@client.CurrentErrorState</span></td>
+                        <td><span class="badge @GetTransactionColor(client.TransactionState)">@client.TransactionState</span></td>
+                        <td class="font-monospace text-primary">@client.LastValue</td>
+                        <td class="text-end">
+                            <div class="btn-group btn-group-sm">
+                                <button class="btn btn-success" @onclick='() => InjectError(client, "None")'>OK</button>
+                                <button class="btn btn-warning text-dark" @onclick='() => InjectError(client, "Timeout")'>Timeout</button>
+                                <button class="btn btn-danger" @onclick='() => InjectError(client, "Crash")'>Crash</button>
+                                <button class="btn btn-dark" @onclick='() => InjectError(client, "DbError")'>DB Err</button>
+                            </div>
+                        </td>
+                    </tr>
+                }
+            </tbody>
+        </table>
+    </div>
+
+    <div class="mt-5 mb-5">
+        <button class="btn btn-sm btn-secondary mb-2" @onclick="ToggleLogs">@(showLogs ? "▼ Ukryj logi" : "▶ Pokaż logi")</button>
+        @if (showLogs)
+        {
+            <div class="card card-body bg-dark text-light font-monospace p-2" style="max-height: 300px; overflow-y: auto; font-size: 0.85rem;">
+                <ul class="list-unstyled mb-0">
+                    @foreach (var log in logs)
+                    {
+                        <li class="border-bottom border-secondary py-1">
+                            <span class="text-info">[@log.Time]</span> <strong class="text-warning">[@log.Source]</strong> <span>@log.Message</span>
+                        </li>
+                    }
+                </ul>
+            </div>
+        }
+    </div>
+</div>
 
 @code {
-    private string value = "";
-    private string result = "";
-    private bool isLoading = false; 
-
-    private async Task Send()
+    // --- KLASY DANYCH ---
+    public class NodeViewModel
     {
-        result = "";
-        isLoading = true;
-        
-        //Logger.LogInformation("Kliknięto przycisk Wyślij. Wartość: {Value}", value);
-        Console.WriteLine($"[DEBUG] Kliknięto przycisk. Wartość: {value}"); // Opcja "brudna" do konsoli
+        public string Id { get; set; } = "";
+        public string Name { get; set; } = "";
+        public string Url { get; set; } = ""; 
+        public string CurrentErrorState { get; set; } = "Działa";
+        public string TransactionState { get; set; } = "Idle";
+        public string LastValue { get; set; } = "-";
+    }
+    class LogEntry { public string Time { get; set; } = ""; public string Source { get; set; } = ""; public string Message { get; set; } = ""; }
 
-        try 
+    // --- STAN ---
+    private string newValue = "";
+    private string transactionResult = "";
+    private bool isTransactionRunning = false;
+    private bool showLogs = true;
+    private List<LogEntry> logs = new();
+    
+    private NodeViewModel coordinatorState = new() { Id = "COORDINATOR", Name = "Koordynator" };
+    private List<NodeViewModel> clients = new(); 
+    private HubConnection? hubConnection;
+
+    protected override void OnInitialized()
+    {
+        var configuredNodes = Configuration.GetSection("ClusterNodes").Get<List<NodeViewModel>>();
+        if (configuredNodes != null)
         {
-            result = await Coordinator.SendUpdate(value);
-            
-            Logger.LogInformation("Otrzymano odpowiedź: {Result}", result);
+            clients = configuredNodes;
+        }
+    }
+
+    protected override async Task OnAfterRenderAsync(bool firstRender)
+    {
+        if (firstRender)
+        {
+            hubConnection = new HubConnectionBuilder()
+                .WithUrl("http://localhost:5000/hubs/transaction")
+                .WithAutomaticReconnect()
+                .Build();
+
+            hubConnection.On<string, string, string>("ReceiveUpdate", async (source, status, message) =>
+            {
+                await InvokeAsync(() =>
+                {
+                    logs.Insert(0, new LogEntry { Time = DateTime.Now.ToLongTimeString(), Source = source, Message = $"{status}: {message}" });
+                    UpdateStateFromLog(source, status, message);
+                    StateHasChanged();
+                });
+            });
+
+            try 
+            {
+                await hubConnection.StartAsync();
+                await InvokeAsync(StateHasChanged);
+            }
+            catch (Exception ex) { Console.WriteLine("SignalR Error: " + ex.Message); }
+        }
+    }
+
+    private async Task SendTransaction()
+    {
+        isTransactionRunning = true;
+        transactionResult = "";
+        ResetVisualState(); 
+        
+        try
+        {
+            transactionResult = await Coordinator.SendUpdate(newValue);
         }
         catch (Exception ex)
         {
-            result = $"BŁĄD: {ex.Message}";
-            Logger.LogError(ex, "Wystąpił błąd podczas wysyłania update'u");
+            transactionResult = "API Error";
+            logs.Insert(0, new LogEntry { Time = DateTime.Now.ToLongTimeString(), Source = "UI", Message = ex.Message });
         }
-        finally 
+        finally
         {
-            isLoading = false;
+            isTransactionRunning = false;
         }
+    }
+
+    // --- LOGIKA STEROWANIA ---
+    private async Task InjectError(NodeViewModel node, string errorType)
+    {
+        node.CurrentErrorState = "Pending..."; 
+        
+        if (node.Id == "COORDINATOR")
+        {
+            await Coordinator.SetCoordinatorErrorState(errorType);
+        }
+        else
+        {
+            await Coordinator.SetClientErrorState(node.Url, errorType);
+        }
+    }
+
+    // --- PARSOWANIE SIGNALR ---
+   private void UpdateStateFromLog(string source, string status, string message)
+    {
+        var targetNode = source == "COORDINATOR" 
+            ? coordinatorState 
+            : clients.FirstOrDefault(c => c.Id == source || c.Url == source || source.Contains(c.Url));
+        
+        if (targetNode != null)
+        {
+            if (status == "STATUS_CHANGE")
+            {
+                targetNode.CurrentErrorState = message == "None" ? "Działa" : message;
+            }
+            // --- Logika 2PC ---
+            else if (status.Contains("PREPARE")) targetNode.TransactionState = "Voting";
+            else if (status.Contains("VOTE_COMMIT")) targetNode.TransactionState = "Ready"; 
+            else if (status.Contains("VOTE_ABORT")) targetNode.TransactionState = "Rejecting";
+            else if (status.Contains("COMMIT")) targetNode.TransactionState = "Committed";
+            else if (status.Contains("ABORT")) targetNode.TransactionState = "Aborted";
+            else if (status.Contains("SUCCESS")) targetNode.TransactionState = "Idle";
+            
+            if (status == "COMMITTED" || status == "VOTE_COMMIT") 
+            {
+                if (!string.IsNullOrEmpty(newValue)) targetNode.LastValue = newValue;
+            }
+        }
+        
+        if (source == "COORDINATOR")
+        {
+            if (status.Contains("SUCCESS")) 
+            {
+                foreach(var c in clients) 
+                {
+                    if(c.TransactionState == "Ready") c.TransactionState = "Committed";
+                    c.LastValue = newValue; // Synchronizacja wartości UI
+                }
+                coordinatorState.TransactionState = "Idle";
+            }
+            else if (status.Contains("ROLLBACK_END"))
+            {
+                foreach(var c in clients) c.TransactionState = "Aborted";
+                coordinatorState.TransactionState = "Idle";
+            }
+        }
+    }
+    
+    private void ResetVisualState()
+    {
+        coordinatorState.TransactionState = "Starting...";
+        foreach(var c in clients) c.TransactionState = "Waiting...";
+    }
+
+    private void ToggleLogs() => showLogs = !showLogs;
+
+    // --- CSS HELPERS ---
+    private string GetStatusColor(string status) => status switch {
+        "Działa" => "bg-success",
+        "None" => "bg-success",
+        "Pending..." => "bg-secondary",
+        _ => "bg-danger"
+    };
+    
+    private string GetTransactionColor(string state) => state switch {
+        "Committed" => "bg-success",
+        "Ready" => "bg-info text-dark",
+        "Aborted" => "bg-danger",
+        "Rejecting" => "bg-danger",
+        "Voting" => "bg-warning text-dark",
+        "Idle" => "bg-secondary",
+        _ => "bg-light text-dark border"
+    };
+
+    public async ValueTask DisposeAsync()
+    {
+        if (hubConnection is not null) await hubConnection.DisposeAsync();
     }
 }
