@@ -44,12 +44,18 @@ public class CoordinatorService
 
     private async Task SendFaultRequest(string baseUrl, string errorType)
     {
+        // Mapowanie nazw z UI na endpointy API
         string endpoint = errorType switch
         {
             "None" => "/restore",
-            "Timeout" or "Error1" => "/fail/timeout",
-            "Crash" or "Error2" => "/fail/crash",
-            "DbError" or "Error3" => "/fail/dberror",
+            "Fail" => "/fail/Fail",
+            "CrashBeforeVote" => "/fail/CrashBeforeVote", 
+            "CrashAfterVote" => "/fail/CrashAfterVote",
+            "Timeout" => "/fail/Timeout",
+            "Crash" => "/fail/Crash",
+            "CrashBeforeCommitSend" => "/fail/CrashBeforeCommitSend",
+            "PartialRequest" => "/fail/PartialRequest",
+            "CommitHalf" => "/fail/CommitHalf",
             _ => "/restore"
         };
 

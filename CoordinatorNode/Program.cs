@@ -4,10 +4,8 @@ using Microsoft.AspNetCore.Mvc;
 
 var builder = WebApplication.CreateBuilder(args);
 
-// Rejestracja serwisów
 builder.Services.AddSignalR();
-builder.Services.AddHttpClient(); 
-
+builder.Services.AddHttpClient();
 builder.Services.AddSingleton<TransactionCoordinatorService>(); 
 
 builder.Services.AddCors(options =>
@@ -22,43 +20,48 @@ builder.Services.AddCors(options =>
 });
 
 var app = builder.Build();
-
 app.UseCors("AllowUI");
-
-// Mapowanie Huba
 app.MapHub<CoordinatorHub>("/hubs/transaction");
 
-// Endpointy Biznesowe
+// --- ENDPOINT BIZNESOWY ---
 app.MapPost("/update", async ([FromBody] UpdateRequest request, TransactionCoordinatorService coordinator) =>
 {
     bool success = await coordinator.PerformTwoPhaseCommitAsync(request.Value);
     return success ? Results.Ok(new { status = "COMMITTED" }) : Results.BadRequest(new { status = "ABORTED" });
 });
 
-// Endpointy Sterujące (Symulacja Błędów)
+// --- ENDPOINTY STERUJĄCE (BŁĘDY) ---
 
 app.MapPost("/restore", async (TransactionCoordinatorService coordinator) => 
 {
-    await coordinator.SetErrorStateAsync("None"); // Bez błędów
+    await coordinator.SetErrorStateAsync("None"); 
     return Results.Ok("Restored");
+});
+
+app.MapPost("/fail/{type}", async (string type, TransactionCoordinatorService service) =>
+{
+    await service.SetErrorStateAsync(type);
+    return Results.Ok($"Set error: {type}");
 });
 
 app.MapPost("/fail1", async (TransactionCoordinatorService coordinator) => 
 {
-    await coordinator.SetErrorStateAsync("Timeout"); // Np. Timeout
-    return Results.Ok("Injected Error 1");
+    await coordinator.SetErrorStateAsync("Timeout"); 
+    return Results.Ok("Set Timeout Mode (Not fully impl in logic yet, but state set)");
 });
 
+// Specjalny stan do testowania awarii w trakcie
 app.MapPost("/fail2", async (TransactionCoordinatorService coordinator) => 
 {
-    await coordinator.SetErrorStateAsync("Crash"); // Np. Crash
-    return Results.Ok("Injected Error 2");
+    await coordinator.SetErrorStateAsync("Crash"); // Natychmiastowy zgon
+    return Results.Ok("Crashed");
 });
 
+// Symulacja awarii tuż przed wysłaniem Commita (do testowania Recovery)
 app.MapPost("/fail3", async (TransactionCoordinatorService coordinator) => 
 {
-    await coordinator.SetErrorStateAsync("DbError"); // Np. Błąd zapisu
-    return Results.Ok("Injected Error 3");
+    await coordinator.SetErrorStateAsync("CrashBeforeCommitSend"); 
+    return Results.Ok("Armed CrashBeforeCommitSend");
 });
 
 app.Run();
