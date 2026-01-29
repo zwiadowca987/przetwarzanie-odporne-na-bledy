@@ -54,6 +54,8 @@ public class CoordinatorService
             "Timeout" => "/fail/Timeout",
             "Crash" => "/fail/Crash",
             "CrashBeforeCommitSend" => "/fail/CrashBeforeCommitSend",
+            "PartialRequest" => "/fail/PartialRequest",
+            "CommitHalf" => "/fail/CommitHalf",
             _ => "/restore"
         };
 

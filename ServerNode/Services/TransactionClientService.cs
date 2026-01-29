@@ -1,8 +1,8 @@
 using ServerNode.dto;
 
 namespace ServerNode.Services;
-using System.Net.Http.Json;
 
+using System.Net.Http.Json;
 using Microsoft.AspNetCore.SignalR.Client;
 
 public class TransactionClientService : IAsyncDisposable
@@ -10,11 +10,11 @@ public class TransactionClientService : IAsyncDisposable
     private readonly ILogger<TransactionClientService> _logger;
     private readonly string _nodeId;
     private readonly string _myUrl;
-    
+
     private readonly HubConnection _hubConnection;
     private readonly HttpClient _peerClient;
     private readonly string[] _peerUrls;
-     
+
     // --- STAN WĘZŁA ---
     private Dictionary<string, string> _storedValues = new();
     private string _lastValueStored = "null";
@@ -26,14 +26,17 @@ public class TransactionClientService : IAsyncDisposable
 
     // --- AWARIE ---
     private string _currentErrorState = "None"; // Typy: None, Fail, CrashBeforeVote, CrashAfterVote
+    private readonly int _decisionTimeoutMs = 4000;
+    
     //private bool _isCrashed => _currentErrorState == "Crash" || _currentErrorState == "CrashBeforeVote" || _currentErrorState == "CrashAfterVote";
-    public TransactionClientService(IConfiguration config, ILogger<TransactionClientService> logger, IHttpClientFactory httpClientFactory)
+    public TransactionClientService(IConfiguration config, ILogger<TransactionClientService> logger,
+        IHttpClientFactory httpClientFactory)
     {
         _logger = logger;
         _nodeId = config["NodeId"] ?? "UNKNOWN";
-        _myUrl = config["ASPNETCORE_URLS"]?.Split(';').FirstOrDefault() ?? "http://localhost:5000"; 
+        _myUrl = config["ASPNETCORE_URLS"]?.Split(';').FirstOrDefault() ?? "http://localhost:5000";
         var hubUrl = config["CoordinatorUrl"] ?? "http://localhost:5000/hubs/transaction";
-        
+
         _peerUrls = config.GetSection("ClusterPeers").Get<string[]>() ?? [];
         _peerClient = httpClientFactory.CreateClient();
         // Konfiguracja połączenia z Hubem Koordynatora
@@ -62,7 +65,8 @@ public class TransactionClientService : IAsyncDisposable
 
     public async Task<bool> PrepareAsync(string transactionId, string value)
     {
-        _logger.LogInformation("[PREPARE] ID: {TransactionId}, Val: {Value}. Stan awarii: {CurrentErrorState}", transactionId, value, _currentErrorState);
+        _logger.LogInformation("[PREPARE] ID: {TransactionId}, Val: {Value}. Stan awarii: {CurrentErrorState}",
+            transactionId, value, _currentErrorState);
         _transactionState = TransactionState.Unknown;
         // Symulacja awarii
         if (_currentErrorState == "Fail")
@@ -83,15 +87,34 @@ public class TransactionClientService : IAsyncDisposable
         _preparedTransactionId = transactionId;
         _preparedValue = value;
         _transactionState = TransactionState.Prepared;
-        await _hubConnection.InvokeAsync("BroadcastNodeStatus", _nodeId, "TRANSACTION_STATUS", _transactionState.ToString()); 
+        await _hubConnection.InvokeAsync("BroadcastNodeStatus", _nodeId, "TRANSACTION_STATUS",
+            _transactionState.ToString());
 
+        _ = WaitForDecisionAsync(transactionId);
+        
         return true;
+    }
+
+    private async Task WaitForDecisionAsync(string transactionId)
+    {
+        await Task.Delay(_decisionTimeoutMs);
+
+        // Sprawdzamy, czy po upływie czasu nadal czekamy (Prepared) na TĘ SAMĄ transakcję
+        if (_transactionState == TransactionState.Prepared && _preparedTransactionId == transactionId)
+        {
+            _logger.LogWarning(
+                "[TIMEOUT] Nie otrzymałem decyzji od Koordynatora dla {Id}. Uruchamiam Protokół Terminacji (pytam kolegów).",
+                transactionId);
+
+            // Pytamy kolegów co robić
+            await AskPeersForDecision(transactionId);
+        }
     }
 
     public async Task<bool> CommitAsync(string transactionId, string value)
     {
         _logger.LogInformation("[COMMIT] ID: {TransactionId}.", transactionId);
-        
+
         if (_currentErrorState == "CrashAfterVote")
         {
             _logger.LogWarning("[SIMULATION] Awaria po głosowaniu (ale przed Commit)!");
@@ -100,12 +123,12 @@ public class TransactionClientService : IAsyncDisposable
             await RecoverAsync();
             await BroadcastStatus();
 
-            return true; 
+            return true;
         }
-        
-        if (_currentErrorState != "None") 
+
+        if (_currentErrorState != "None")
         {
-            return false; 
+            return false;
         }
 
         if (_transactionState == TransactionState.Prepared && _preparedTransactionId == transactionId)
@@ -117,19 +140,20 @@ public class TransactionClientService : IAsyncDisposable
             await BroadcastStatus();
             return true;
         }
+
         if (_transactionState == TransactionState.Committed && _storedValues.ContainsKey(transactionId))
-            return true; 
+            return true;
 
         _logger.LogWarning("[COMMIT] Otrzymano COMMIT, ale stan lokalny to {State}", _transactionState.ToString());
         return false;
-        
     }
 
     public async Task AbortAsync()
     {
         _logger.LogInformation("[ABORT] Czyszczenie stanu prepare.");
         _transactionState = TransactionState.Aborted;
-        await _hubConnection.InvokeAsync("BroadcastNodeStatus", _nodeId, "TRANSACTION_STATUS", _transactionState.ToString());
+        await _hubConnection.InvokeAsync("BroadcastNodeStatus", _nodeId, "TRANSACTION_STATUS",
+            _transactionState.ToString());
         _preparedValue = "null";
     }
 
@@ -138,7 +162,7 @@ public class TransactionClientService : IAsyncDisposable
     public async Task SetErrorStateAsync(string errorType)
     {
         _currentErrorState = errorType;
-        
+
         _logger.LogWarning("[FAULT] Zmiana stanu awarii na: {ErrorType}.", errorType);
         await BroadcastStatus();
     }
@@ -148,12 +172,13 @@ public class TransactionClientService : IAsyncDisposable
     public async Task RecoverAsync()
     {
         _logger.LogInformation("[RECOVERY] Rozpoczynam procedurę naprawczą...");
-        
+
         // 1. Jeśli padliśmy, będąc w stanie PREPARED, nie wiemy jaka była decyzja Koordynatora.
         // Musimy zapytać kolegów.
         if (_transactionState == TransactionState.Prepared)
         {
-            _logger.LogWarning("[RECOVERY] Jestem w stanie PREPARED ({Id}). Pytam innych węzłów...", _preparedTransactionId);
+            _logger.LogWarning("[RECOVERY] Jestem w stanie PREPARED ({Id}). Pytam innych węzłów...",
+                _preparedTransactionId);
             await AskPeersForDecision(_preparedTransactionId);
         }
         else
@@ -171,12 +196,13 @@ public class TransactionClientService : IAsyncDisposable
         foreach (var peer in _peerUrls)
         {
             // Nie pytaj samego siebie
-            if (peer.Contains(_myUrl) || string.IsNullOrEmpty(peer)) continue; 
+            if (peer.Contains(_myUrl) || string.IsNullOrEmpty(peer)) continue;
 
             try
             {
-                var response = await _peerClient.GetFromJsonAsync<PeerStatusResponse>($"{peer}/ask-status/{transactionId}");
-                
+                var response =
+                    await _peerClient.GetFromJsonAsync<PeerStatusResponse>($"{peer}/ask-status/{transactionId}");
+
                 if (response == null) continue;
 
                 _logger.LogInformation("[PEER-CHECK] Węzeł {Peer} odpowiedział: {State}", peer, response.State);
@@ -188,8 +214,9 @@ public class TransactionClientService : IAsyncDisposable
                     _storedValues[transactionId] = response.Value ?? _preparedValue;
                     _lastValueStored = response.Value ?? _preparedValue;
                     _transactionState = TransactionState.Committed;
-                    await _hubConnection.InvokeAsync("BroadcastNodeStatus", _nodeId, "TRANSACTION_STATUS", _transactionState.ToString());
-                    return; 
+                    await _hubConnection.InvokeAsync("BroadcastNodeStatus", _nodeId, "TRANSACTION_STATUS",
+                        _transactionState.ToString());
+                    return;
                 }
 
                 // 2. Jeśli Q otrzymał ABORT -> P może zaniechać
@@ -197,21 +224,24 @@ public class TransactionClientService : IAsyncDisposable
                 {
                     _logger.LogInformation("[DECISION] Kolega ma ABORT. Anuluję lokalnie.");
                     _transactionState = TransactionState.Aborted;
-                    await _hubConnection.InvokeAsync("BroadcastNodeStatus", _nodeId, "TRANSACTION_STATUS", _transactionState.ToString());
-                    return; 
+                    await _hubConnection.InvokeAsync("BroadcastNodeStatus", _nodeId, "TRANSACTION_STATUS",
+                        _transactionState.ToString());
+                    return;
                 }
 
                 // 3. Jeśli Q jest Unknown (nie słyszał o transakcji) -> P powinien zaniechać
                 if (response.State == TransactionState.Unknown)
                 {
-                    _logger.LogInformation("[DECISION] Kolega nie zna transakcji. Zakładam, że Koordynator padł przy VR. Anuluję.");
+                    _logger.LogInformation(
+                        "[DECISION] Kolega nie zna transakcji. Zakładam, że Koordynator padł przy VR. Anuluję.");
                     _transactionState = TransactionState.Aborted;
-                    await _hubConnection.InvokeAsync("BroadcastNodeStatus", _nodeId, "TRANSACTION_STATUS", _transactionState,ToString());
+                    await _hubConnection.InvokeAsync("BroadcastNodeStatus", _nodeId, "TRANSACTION_STATUS",
+                        _transactionState, ToString());
                 }
 
                 // 4. Jeśli Q jest Prepared (też czeka) -> Szukamy dalej...
             }
-            catch 
+            catch
             {
                 _logger.LogWarning("[PEER-CHECK] Nie udało się połączyć z {Peer}", peer);
             }
@@ -220,12 +250,12 @@ public class TransactionClientService : IAsyncDisposable
         // Jeśli przeszliśmy pętlę i wszyscy są PREPARED lub nie odpowiadają:
         _logger.LogError("[BLOCKED] Wszyscy dostępni koledzy też czekają (PREPARED). Czekam na Koordynatora.");
     }
-    
+
     // --- ENDPOINT DLA INNYCH (Responder) ---
     public PeerStatusResponse GetLocalStatus(string transactionId)
     {
         // Jeśli pytają o transakcję, której nie znamy -> Unknown
-        if (_preparedTransactionId != transactionId ||  !_storedValues.ContainsKey(transactionId))
+        if (_preparedTransactionId != transactionId || !_storedValues.ContainsKey(transactionId))
             return new PeerStatusResponse(_nodeId, TransactionState.Unknown, null);
 
         // Jeśli mamy zapisaną wartość, odsyłamy ją 
@@ -233,7 +263,7 @@ public class TransactionClientService : IAsyncDisposable
 
         return new PeerStatusResponse(_nodeId, _transactionState, val);
     }
-    
+
     public string GetStatus() => $"State: {_currentErrorState}, Value: {_lastValueStored}";
 
     private async Task BroadcastStatus(string status, string message)
@@ -248,12 +278,14 @@ public class TransactionClientService : IAsyncDisposable
     {
         if (_hubConnection.State == HubConnectionState.Connected)
         {
-            var statusMsg = _currentErrorState; 
+            var statusMsg = _currentErrorState;
             await _hubConnection.InvokeAsync("BroadcastNodeStatus", _nodeId, "STATUS_CHANGE", statusMsg);
             await _hubConnection.InvokeAsync("BroadcastNodeStatus", _nodeId, "VALUE_UPDATE", _lastValueStored);
-            await _hubConnection.InvokeAsync("BroadcastNodeStatus", _nodeId, "TRANSACTION_STATUS", _transactionState.ToString());
+            await _hubConnection.InvokeAsync("BroadcastNodeStatus", _nodeId, "TRANSACTION_STATUS",
+                _transactionState.ToString());
         }
     }
+
     public async ValueTask DisposeAsync()
     {
         await _hubConnection.DisposeAsync();

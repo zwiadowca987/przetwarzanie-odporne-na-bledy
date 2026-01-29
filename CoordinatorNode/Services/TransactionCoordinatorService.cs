@@ -9,19 +9,12 @@ public class TransactionCoordinatorService
 {
     private readonly IHttpClientFactory _httpClientFactory;
     private readonly IHubContext<CoordinatorHub, ITransactionClient> _hubContext;
-    
-    // Lista węzłów (w prawdziwym projekcie pobierana z appsettings.json)
     private readonly string[] _nodes;
-
     private readonly int _transactionTimeoutMs = 7000; 
 
-    // --- SYMULACJA ZAPIS STANU  ---
     private RecoveryLog _stableStorage = new();
-
-    // --- SYMULACJA AWARII ---
     private string _currentErrorState = "None";
-
-    private bool _isCrashed = false;
+    private bool _isCrashed => _currentErrorState == "Crash";
 
     public TransactionCoordinatorService(
         IHttpClientFactory httpClientFactory,
@@ -36,9 +29,7 @@ public class TransactionCoordinatorService
     public async Task SetErrorStateAsync(string errorType)
     {
         _currentErrorState = errorType;
-        Console.WriteLine($"[SIMULATION] Zmiana stanu Koordynatora na: {errorType}");
-
-        // Powiadamiamy UI 
+        Console.WriteLine($"[SIMULATION] Stan Koordynatora: {errorType}");
         await NotifyUI("COORDINATOR", "STATUS_CHANGE", errorType);
         
         if (errorType == "None")
@@ -50,7 +41,6 @@ public class TransactionCoordinatorService
     // --- GŁÓWNA LOGIKA TRANSAKCJI ---
     public async Task<bool> PerformTwoPhaseCommitAsync(string value)
     {
-
         if (_isCrashed) return false;
 
         var transactionId = Guid.NewGuid().ToString();
@@ -61,7 +51,7 @@ public class TransactionCoordinatorService
 
         // --- FAZA 1: GŁOSOWANIE ---
         
-        bool voteResult = await GatherVotesAsync(client, transactionId, value);
+        var voteResult = await GatherVotesAsync(client, transactionId, value);
 
         if (_isCrashed) return false; // Symulacja: padł w trakcie podejmowania decyzji
 
@@ -69,27 +59,29 @@ public class TransactionCoordinatorService
 
         if (voteResult)
         {
-            // COMMIT
             SaveState(transactionId, value, CoordinatorState.DecidedCommit);
             await NotifyUI("COORDINATOR", "DECISION", "Decyzja: COMMIT");
             
             if (CheckCrashPoint("CrashBeforeCommitSend")) return true; 
 
             await SendGlobalDecisionAsync(client, transactionId, value, commit: true);
-            await NotifyUI("COORDINATOR", "SUCCESS", "Transakcja zakończona (Committed).");
             
+            if (_isCrashed) return true;
+
+            await NotifyUI("COORDINATOR", "SUCCESS", "Transakcja zakończona.");
             SaveState("", "", CoordinatorState.Idle);
             return true;
         }
         else
         {
-            // Decyzja: ABORT
             SaveState(transactionId, value, CoordinatorState.DecidedAbort);
-            await NotifyUI("COORDINATOR", "DECISION", "Decyzja: ABORT (Timeout lub Veto)");
+            await NotifyUI("COORDINATOR", "DECISION", "Decyzja: ABORT");
             
             await SendGlobalDecisionAsync(client, transactionId, value, commit: false);
-            await NotifyUI("COORDINATOR", "ROLLBACK_END", "Transakcja anulowana.");
             
+            if (_isCrashed) return false;
+
+            await NotifyUI("COORDINATOR", "ROLLBACK_END", "Transakcja anulowana.");
             SaveState("", "", CoordinatorState.Idle);
             return false;
         }
@@ -100,130 +92,133 @@ public class TransactionCoordinatorService
     private async Task<bool> GatherVotesAsync(HttpClient client, string txId, string value)
     {
         var request = new TransactionRequest(txId, value);
-        
-        var voteTasks = _nodes.Select(async node =>
+        var responses = new List<Task<bool>>();
+        int count = 0;
+
+        foreach (var node in _nodes)
         {
-            try
+            if (_currentErrorState == "PartialRequest" && count >= _nodes.Length / 2)
             {
-                await NotifyUI("COORDINATOR", "PREPARE_SEND", $"Do: {node}");
-                var response = await client.PostAsJsonAsync($"{node}/prepare", request);
-                
-                if (response.IsSuccessStatusCode)
-                {
-                    await NotifyUI(node, "VOTE_COMMIT", "Głos na TAK");
-                    return true;
-                }
-                else
-                {
-                    await NotifyUI(node, "VOTE_ABORT", "Głos na NIE");
-                    return false;
-                }
-            }
-            catch
-            {
-                await NotifyUI("COORDINATOR", "ERROR", $"Brak kontaktu z {node}");
+                await TriggerCrash("Symulacja Fail1: Padł w trakcie PREPARE");
                 return false; 
             }
-        }).ToList();
+
+            responses.Add(SendPrepareSingle(client, node, request));
+            count++;
+        }
 
         try
         {
-            var allVotesTask = Task.WhenAll(voteTasks);
+            var allVotesTask = Task.WhenAll(responses);
             var timeoutTask = Task.Delay(_transactionTimeoutMs);
 
-            var completedTask = await Task.WhenAny(allVotesTask, timeoutTask);
-
-            if (completedTask == timeoutTask)
+            if (await Task.WhenAny(allVotesTask, timeoutTask) == timeoutTask)
             {
-                await NotifyUI("COORDINATOR", "TIMEOUT", "Przekroczono czas na głosy! Abort.");
-                return false; 
+                await NotifyUI("COORDINATOR", "TIMEOUT", "Timeout głosowania!");
+                return false;
             }
 
-            // Sprawdzamy wyniki
             var results = await allVotesTask;
-            return results.All(vote => vote); 
+            return results.Length == _nodes.Length && results.All(v => v);
         }
-        catch (Exception ex)
-        {
-            Console.WriteLine($"Critical error gathering votes: {ex.Message}");
-            return false;
-        }
+        catch { return false; }
     }
 
+    private async Task<bool> SendPrepareSingle(HttpClient client, string node, TransactionRequest request)
+    {
+        try {
+            await NotifyUI("COORDINATOR", "PREPARE_SEND", $"Do: {node}");
+            var response = await client.PostAsJsonAsync($"{node}/prepare", request);
+            if (response.IsSuccessStatusCode) {
+                await NotifyUI(node, "VOTE_COMMIT", "OK");
+                return true;
+            }
+            await NotifyUI(node, "VOTE_ABORT", "NO");
+            return false;
+        } catch { return false; }
+    }
+
+    // --- FAZA 2 z Symulacją Awarii ---
     private async Task SendGlobalDecisionAsync(HttpClient client, string txId, string value, bool commit)
     {
         var request = new TransactionRequest(txId, value);
         var endpoint = commit ? "commit" : "abort";
+        int count = 0;
 
-        var tasks = _nodes.Select(node => 
-            client.PostAsJsonAsync($"{node}/{endpoint}", request)
-        );
+        foreach (var node in _nodes)
+        {
+            if (_currentErrorState == "CommitHalf" && count >= _nodes.Length / 2)
+            {
+                await TriggerCrash($"Symulacja Fail3: Padł w trakcie {endpoint.ToUpper()}");
+                return; 
+            }
 
-        await Task.WhenAll(tasks);
+            _ = client.PostAsJsonAsync($"{node}/{endpoint}", request);
+            count++;
+        }
     }
 
-    // --- REKONSTRUKCJA (Recovery Protocol) ---
-
+    // --- REKONSTRUKCJA (Recovery) ---
     private async Task RecoveryProcess()
     {
         var log = _stableStorage;
         var client = _httpClientFactory.CreateClient();
+        Console.WriteLine($"[RECOVERY] ID: {log.TransactionId}, Stan: {log.State}");
 
-        Console.WriteLine($"[RECOVERY] Wznawianie. Stan z dysku: {log.State}, ID: {log.TransactionId}");
+        _currentErrorState = "None"; 
 
         switch (log.State)
         {
             case CoordinatorState.Idle:
                 await NotifyUI("COORDINATOR", "INFO", "System wstał. Czysty stan.");
                 break;
-
             case CoordinatorState.WaitingForVotes:
-               
-                await NotifyUI("COORDINATOR", "RECOVERY", "Wznawiam głosowanie (VR)...");
-                await SendGlobalDecisionAsync(client, log.TransactionId, log.Value, commit: false);
-                await NotifyUI("COORDINATOR", "RECOVERY_ACTION", "Wysłano globalny ABORT dla przerwanej transakcji.");
+                await NotifyUI("COORDINATOR", "RECOVERY", "Przerwano w trakcie głosowania. ABORT.");
+                await SendGlobalDecisionSafe(client, log.TransactionId, log.Value, false);
                 _stableStorage.State = CoordinatorState.Idle;
                 break;
-
             case CoordinatorState.DecidedCommit:
-                await NotifyUI("COORDINATOR", "RECOVERY", "Dosyłam decyzję COMMIT...");
-                await SendGlobalDecisionAsync(client, log.TransactionId, log.Value, commit: true);
+                await NotifyUI("COORDINATOR", "RECOVERY", "Dokańczam COMMIT...");
+                await SendGlobalDecisionSafe(client, log.TransactionId, log.Value, true);
                 _stableStorage.State = CoordinatorState.Idle;
                 break;
-
             case CoordinatorState.DecidedAbort:
-                await NotifyUI("COORDINATOR", "RECOVERY", "Dosyłam decyzję ABORT...");
-                await SendGlobalDecisionAsync(client, log.TransactionId, log.Value, commit: false);
+                await NotifyUI("COORDINATOR", "RECOVERY", "Dokańczam ABORT...");
+                await SendGlobalDecisionSafe(client, log.TransactionId, log.Value, false);
                 _stableStorage.State = CoordinatorState.Idle;
                 break;
         }
     }
 
-    private async Task RollbackAsync(HttpClient client)
+    private async Task SendGlobalDecisionSafe(HttpClient client, string txId, string value, bool commit)
     {
-        await NotifyUI("COORDINATOR", "ROLLBACK_START", "Wycofywanie transakcji (ABORT)...");
-        foreach (var node in _nodes)
-        {
-            _ = client.PostAsync($"{node}/abort", null);
-        }
-
-        await NotifyUI("COORDINATOR", "ROLLBACK_END", "Transakcja anulowana.");
+        var request = new TransactionRequest(txId, value);
+        var endpoint = commit ? "commit" : "abort";
+        var tasks = _nodes.Select(node => client.PostAsJsonAsync($"{node}/{endpoint}", request));
+        await Task.WhenAll(tasks);
     }
-    private void SaveState(string txId, string value, CoordinatorState state)
+
+    // --- UTILS ---
+    private async Task TriggerCrash(string reason)
     {
-        _stableStorage = new RecoveryLog { TransactionId = txId, Value = value, State = state };
-        Console.WriteLine($"[DISK WRITE] State: {state}, ID: {txId}");
+        _currentErrorState = "Crash";
+        await NotifyUI("COORDINATOR", "STATUS_CHANGE", "Crash");
+        Console.WriteLine($"[CRASH] {reason}");
     }
 
     private bool CheckCrashPoint(string trigger)
     {
         if (_currentErrorState == trigger)
         {
-            _currentErrorState = "Crash"; 
-            NotifyUI("COORDINATOR", "STATUS_CHANGE", "Crash").Wait();
+            _ = TriggerCrash($"Symulacja {trigger}");
             return true;
         }
         return false;
+    }
+
+    private void SaveState(string txId, string value, CoordinatorState state)
+    {
+        _stableStorage = new RecoveryLog { TransactionId = txId, Value = value, State = state };
     }
 
     private async Task NotifyUI(string source, string status, string message)

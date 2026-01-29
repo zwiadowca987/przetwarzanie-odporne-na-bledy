@@ -56,9 +56,9 @@
                     <span class="me-2 small text-muted">Symulacja awarii:</span>
                     <div class="btn-group btn-group-sm">
                         <button class="btn btn-outline-success" @onclick='() => InjectError(coordinatorState, "None")'>OK</button>
-                        <button class="btn btn-outline-warning text-dark" @onclick='() => InjectError(coordinatorState, "Timeout")'>Timeout</button>
-                        <button class="btn btn-outline-danger" @onclick='() => InjectError(coordinatorState, "Crash")'>Crash</button>
-                        <button class="btn btn-outline-dark" @onclick='() => InjectError(coordinatorState, "CrashBeforeCommitSend")' title="Awaria po decyzji, przed wysłaniem">Crash Before Send</button>
+                        <button class="btn btn-outline-warning text-dark" @onclick='() => InjectError(coordinatorState, "PartialRequest")'>Partial Request</button>
+                        <button class="btn btn-outline-danger" @onclick='() => InjectError(coordinatorState, "CrashBeforeCommitSend")' title="Awaria przed rozesłaniem decyzji">Crash before send</button>
+                        <button class="btn btn-outline-dark" @onclick='() => InjectError(coordinatorState, "CommitHalf")'>Crash During Commit </button>
                     </div>
                 </div>
             </div>
