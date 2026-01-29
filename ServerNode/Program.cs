@@ -1,68 +1,69 @@
-using Microsoft.AspNetCore.Mvc;
 using ServerNode.Services;
+using Microsoft.AspNetCore.Mvc;
+using ServerNode;
+using ServerNode.dto;
 
 var builder = WebApplication.CreateBuilder(args);
-
-// Rejestracja serwisu jako Singleton
 builder.Services.AddSingleton<TransactionClientService>();
+builder.Services.AddHttpClient();
 
 var app = builder.Build();
 
-// Automatyczny start połączenia SignalR przy starcie aplikacji
 var transactionService = app.Services.GetRequiredService<TransactionClientService>();
 _ = Task.Run(async () => await transactionService.StartAsync());
 
+// --- API 2PC ---
 
-// --- ENDPOINTY 2PC ---
-
-app.MapPost("/prepare", async ([FromBody] string value, TransactionClientService service) =>
+app.MapPost("/prepare", async ([FromBody] TransactionRequest req, TransactionClientService service) =>
 {
-    var result = await service.PrepareAsync(value);
-    return result ? Results.Ok("VOTE_COMMIT") : Results.BadRequest("VOTE_ABORT");
+    var result = await service.PrepareAsync(req.TransactionId, req.Value);
+    return result ? Results.Ok("VOTE_COMMIT") : Results.BadRequest("VOTE_ABORT"); 
 });
 
-app.MapPost("/commit", async ([FromBody] string value, TransactionClientService service) =>
+app.MapPost("/commit", async ([FromBody] TransactionRequest req, TransactionClientService service) =>
 {
-    var result = await service.CommitAsync(value);
+    var result = await service.CommitAsync(req.TransactionId, req.Value);
     return result ? Results.Ok("COMMITTED") : Results.StatusCode(500);
 });
 
-app.MapPost("/abort", (TransactionClientService service) =>
+app.MapPost("/abort", async (TransactionClientService service) =>
 {
-    service.Abort();
+    await service.AbortAsync();
     return Results.Ok("ABORTED");
 });
 
 
-// --- ENDPOINTY STERUJĄCE (FAULTS) ---
+// --- API STERUJĄCE (AWARIE) ---
 
 app.MapPost("/restore", async (TransactionClientService service) =>
 {
     await service.SetErrorStateAsync("None");
-    return Results.Ok("OK");
+    return Results.Ok("Restored");
 });
 
-app.MapPost("/fail/timeout", async (TransactionClientService service) =>
+app.MapPost("/fail/{type}", async (string type, TransactionClientService service) =>
 {
-    await service.SetErrorStateAsync("Timeout");
-    return Results.Ok("OK");
+    // type: Fail, CrashBeforeVote, CrashAfterVote 
+    await service.SetErrorStateAsync(type);
+    return Results.Ok($"Set error: {type}");
 });
 
-app.MapPost("/fail/crash", async (TransactionClientService service) =>
+
+// --- API STATUSOWE ---
+
+app.MapGet("/status", async (TransactionClientService service) =>
 {
-    await service.SetErrorStateAsync("Crash");
-    return Results.Ok("OK");
+    await service.BroadcastStatus();
+    return Results.Ok("Status broadcasted via SignalR");
 });
 
-app.MapPost("/fail/dberror", async (TransactionClientService service) =>
+
+// --- API KOMUNIKACJA MIĘDZY SERWERAMI ---
+
+app.MapGet("/ask-status/{transactionId}", (string transactionId, TransactionClientService service) =>
 {
-    await service.SetErrorStateAsync("DbError");
-    return Results.Ok("OK");
+    // Inny węzeł pyta nas o stan transakcji
+    var status = service.GetLocalStatus(transactionId);
+    return Results.Ok(status);
 });
-
-app.MapGet("/status", (TransactionClientService service) =>
-{
-    return Results.Ok(service.GetStatus());
-});
-
 app.Run();

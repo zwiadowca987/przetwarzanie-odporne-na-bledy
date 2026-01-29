@@ -58,6 +58,7 @@
                         <button class="btn btn-outline-success" @onclick='() => InjectError(coordinatorState, "None")'>OK</button>
                         <button class="btn btn-outline-warning text-dark" @onclick='() => InjectError(coordinatorState, "Timeout")'>Timeout</button>
                         <button class="btn btn-outline-danger" @onclick='() => InjectError(coordinatorState, "Crash")'>Crash</button>
+                        <button class="btn btn-outline-dark" @onclick='() => InjectError(coordinatorState, "CrashBeforeCommitSend")' title="Awaria po decyzji, przed wysłaniem">Crash Before Send</button>
                     </div>
                 </div>
             </div>
@@ -90,9 +91,9 @@
                         <td class="text-end">
                             <div class="btn-group btn-group-sm">
                                 <button class="btn btn-success" @onclick='() => InjectError(client, "None")'>OK</button>
-                                <button class="btn btn-warning text-dark" @onclick='() => InjectError(client, "Timeout")'>Timeout</button>
-                                <button class="btn btn-danger" @onclick='() => InjectError(client, "Crash")'>Crash</button>
-                                <button class="btn btn-dark" @onclick='() => InjectError(client, "DbError")'>DB Err</button>
+                                <button class="btn btn-warning text-dark" @onclick='() => InjectError(client, "Fail")'>Fail</button>
+                                <button class="btn btn-danger" @onclick='() => InjectError(client, "CrashBeforeVote")'>Crash Before Vote</button>
+                                <button class="btn btn-dark" @onclick='() => InjectError(client, "CrashAfterVote")'>Crash After Vote</button>
                             </div>
                         </td>
                     </tr>
@@ -229,17 +230,16 @@
             {
                 targetNode.CurrentErrorState = message == "None" ? "Działa" : message;
             }
-            // --- Logika 2PC ---
+            else if (status == "VALUE_UPDATE")
+            {
+                targetNode.LastValue = message;
+            }
             else if (status.Contains("PREPARE")) targetNode.TransactionState = "Voting";
             else if (status.Contains("VOTE_COMMIT")) targetNode.TransactionState = "Ready"; 
             else if (status.Contains("VOTE_ABORT")) targetNode.TransactionState = "Rejecting";
-            else if (status.Contains("COMMIT")) targetNode.TransactionState = "Committed";
-            else if (status.Contains("ABORT")) targetNode.TransactionState = "Aborted";
-            else if (status.Contains("SUCCESS")) targetNode.TransactionState = "Idle";
-            
-            if (status == "COMMITTED" || status == "VOTE_COMMIT") 
+            else if (status.Contains("TRANSACTION_STATUS")) 
             {
-                if (!string.IsNullOrEmpty(newValue)) targetNode.LastValue = newValue;
+                targetNode.TransactionState = message;
             }
         }
         
@@ -247,16 +247,10 @@
         {
             if (status.Contains("SUCCESS")) 
             {
-                foreach(var c in clients) 
-                {
-                    if(c.TransactionState == "Ready") c.TransactionState = "Committed";
-                    c.LastValue = newValue; // Synchronizacja wartości UI
-                }
                 coordinatorState.TransactionState = "Idle";
             }
-            else if (status.Contains("ROLLBACK_END"))
+            else if (status.Contains("ROLLBACK_END") || status.Contains("DECISION: ABORT"))
             {
-                foreach(var c in clients) c.TransactionState = "Aborted";
                 coordinatorState.TransactionState = "Idle";
             }
         }
