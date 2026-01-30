@@ -145,6 +145,8 @@ public class TransactionClientService : IAsyncDisposable
             return true;
 
         _logger.LogWarning("[COMMIT] Otrzymano COMMIT, ale stan lokalny to {State}", _transactionState.ToString());
+
+        _transactionState = TransactionState.Unknown;
         return false;
     }
 
@@ -207,15 +209,14 @@ public class TransactionClientService : IAsyncDisposable
 
                 _logger.LogInformation("[PEER-CHECK] Węzeł {Peer} odpowiedział: {State}", peer, response.State);
 
-                // 1. Jeśli Q otrzymał COMMIT -> P może zatwierdzić
+                 // 1. Jeśli Q otrzymał COMMIT -> P może zatwierdzić
                 if (response.State == TransactionState.Committed)
                 {
                     _logger.LogInformation("[DECISION] Kolega ma COMMIT. Zatwierdzam lokalnie.");
                     _storedValues[transactionId] = response.Value ?? _preparedValue;
                     _lastValueStored = response.Value ?? _preparedValue;
                     _transactionState = TransactionState.Committed;
-                    await _hubConnection.InvokeAsync("BroadcastNodeStatus", _nodeId, "TRANSACTION_STATUS",
-                        _transactionState.ToString());
+                    await BroadcastStatus();
                     return;
                 }
 
@@ -224,8 +225,7 @@ public class TransactionClientService : IAsyncDisposable
                 {
                     _logger.LogInformation("[DECISION] Kolega ma ABORT. Anuluję lokalnie.");
                     _transactionState = TransactionState.Aborted;
-                    await _hubConnection.InvokeAsync("BroadcastNodeStatus", _nodeId, "TRANSACTION_STATUS",
-                        _transactionState.ToString());
+                    await BroadcastStatus();
                     return;
                 }
 
@@ -235,8 +235,8 @@ public class TransactionClientService : IAsyncDisposable
                     _logger.LogInformation(
                         "[DECISION] Kolega nie zna transakcji. Zakładam, że Koordynator padł przy VR. Anuluję.");
                     _transactionState = TransactionState.Aborted;
-                    await _hubConnection.InvokeAsync("BroadcastNodeStatus", _nodeId, "TRANSACTION_STATUS",
-                        _transactionState, ToString());
+                    await BroadcastStatus();
+                    return;
                 }
 
                 // 4. Jeśli Q jest Prepared (też czeka) -> Szukamy dalej...
